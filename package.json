@@ -1,0 +1,32 @@
+{
+  "name": "vscode-micromamba-env",
+  "displayName": "Micromamba Environment Provider (python-environments)",
+  "description": "Discovers, displays, set your micromamba environments through the Python Environments extension.",
+  "version": "0.1.0",
+  "publisher": "symzn",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "extensionDependencies": [
+    "ms-python.vscode-python-envs"
+  ],
+  "contributes": {},
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {}
+}
