@@ -125,6 +125,8 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
     private _initialized: Deferred<void> | undefined;
     private mambaRootPrefix: string | undefined;
     private watchers: FileSystemWatcher[] = [];
+    private temporaryWatchers: Map<string, { watcher: FileSystemWatcher; timeout: NodeJS.Timeout }> = new Map();
+    private refreshPromise: Promise<void> | undefined;
 
     private fsPathToEnv: Map<string, PythonEnvironment> = new Map();
     private globalEnv: PythonEnvironment | undefined;
@@ -139,6 +141,11 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
         this._onDidChangeEnvironments.dispose();
         this._onDidChangeEnvironment.dispose();
         this.watchers.forEach(w => w.dispose());
+        this.temporaryWatchers.forEach(w => {
+            clearTimeout(w.timeout);
+            w.watcher.dispose();
+        });
+        this.temporaryWatchers.clear();
     }
     
     private async getMambaRootPrefix(): Promise<string> {
@@ -180,27 +187,35 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
 
         await this.refresh(undefined);
         await this.loadEnvMap();
+        // Set up file watcher
+        const condaFolderPath = path.join(os.homedir(), '.conda');
+        if (await pathExists(condaFolderPath)) {
+            const watcher = workspace.createFileSystemWatcher(
+                new RelativePattern(Uri.file(condaFolderPath), 'environments.txt')
+            );
 
-        // Set up file watchers
-        const rootPrefix = await this.getMambaRootPrefix();
-        const envsDir = path.join(rootPrefix, 'envs');
-        if (await pathExists(envsDir)) {
-            const watcher = workspace.createFileSystemWatcher(new RelativePattern(Uri.file(envsDir), '**/*'));
-            watcher.onDidCreate(() => this.refresh(undefined));
-            watcher.onDidDelete(() => this.refresh(undefined));
+            const scheduleRefresh = (uri: Uri) => {
+                this.log.info(`Change detected in: ${uri.fsPath}. Scheduling a refresh.`);
+                if (!this.refreshPromise) {
+                    this.refreshPromise = this.refresh(undefined).finally(() => {
+                        this.refreshPromise = undefined;
+                    });
+                }
+            };
+
+            let debounceTimer: NodeJS.Timeout;
+            const debouncedRefresh = (uri: Uri) => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => scheduleRefresh(uri), 500);
+            };
+
+            watcher.onDidChange(debouncedRefresh);
+            watcher.onDidCreate(debouncedRefresh);
+            watcher.onDidDelete(debouncedRefresh);
+
             this.context.subscriptions.push(watcher);
             this.watchers.push(watcher);
-            this.log.info(`Watching for changes in: ${envsDir}`);
-        }
-
-        // This is the most important watcher
-        const environmentsTxtPath = path.join(os.homedir(), '.conda', 'environments.txt');
-        if (await pathExists(environmentsTxtPath)) {
-            const watcher = workspace.createFileSystemWatcher(environmentsTxtPath);
-            watcher.onDidChange(() => this.refresh(undefined));
-            this.context.subscriptions.push(watcher);
-            this.watchers.push(watcher);
-            this.log.info(`Watching for changes in: ${environmentsTxtPath}`);
+            this.log.info(`Watching for changes in: ${path.join(condaFolderPath, 'environments.txt')}`);
         }
 
         this._initialized.resolve();
@@ -233,6 +248,18 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
     public async refresh(scope: RefreshEnvironmentsScope): Promise<void> {
         if (!this.micromambaExePath) return;
 
+        const allPrefixes = await this.getEnvsFromEnvironmentsTxt();
+        const currentPrefixes = new Set(allPrefixes);
+
+        for (const [prefix, { watcher, timeout }] of this.temporaryWatchers.entries()) {
+            if (!currentPrefixes.has(prefix)) {
+                this.log.info(`Environment at ${prefix} was removed. Cleaning up its temporary watcher.`);
+                clearTimeout(timeout);
+                watcher.dispose();
+                this.temporaryWatchers.delete(prefix);
+            }
+        }
+
         await withProgress({ location: ProgressLocation.Window, title: 'Searching Micromamba environments...' },
             async () => {
                 const oldEnvs = [...this.collection];
@@ -243,8 +270,6 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
                     const globalEnvsPath = normalize(path.join(rootPrefix, 'envs'));
                     const workspaceFolders = this.api.getPythonProjects().map(p => normalize(p.uri.fsPath));
 
-                    const allPrefixes = await this.getEnvsFromEnvironmentsTxt();
-
                     const isWorkspace = (p: string) => workspaceFolders.some(ws => normalize(p).startsWith(ws));
                     const isGlobalNamed = (p: string) => normalize(path.dirname(p)) === globalEnvsPath;
 
@@ -253,13 +278,49 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
                     this.log.info(`Found ${allPrefixes.length} total envs, processing ${relevantPrefixes.length} relevant envs.`);
                     
                     newEnvs = (await Promise.all(relevantPrefixes.map(async (prefix) => {
-                        const folderName = path.basename(prefix);
                         if (!await pathExists(prefix)) return null;
 
+                        const folderName = path.basename(prefix);
                         const pythonExecutable = process.platform === 'win32' ? path.join(prefix, 'python.exe') : path.join(prefix, 'bin', 'python');
                         const pythonExists = await pathExists(pythonExecutable);
-                        const group = isWorkspace(prefix) ? 'Workspace' : 'Named';
 
+                        if (pythonExists && this.temporaryWatchers.has(prefix)) {
+                            this.log.info(`Python executable found for ${prefix}, removing temporary watcher.`);
+                            const { watcher, timeout } = this.temporaryWatchers.get(prefix)!;
+                            clearTimeout(timeout);
+                            watcher.dispose();
+                            this.temporaryWatchers.delete(prefix);
+                        }
+
+                        if (!pythonExists && !this.temporaryWatchers.has(prefix)) {
+                            const stats = await fs.stat(prefix);
+                            const ageInSeconds = (Date.now() - stats.mtime.getTime()) / 1000;
+                            
+                            if (ageInSeconds < 60) {
+                                this.log.info(`Python executable not found for new environment ${prefix}. Setting up a temporary watcher.`);
+                                const watcher = workspace.createFileSystemWatcher(new RelativePattern(Uri.file(prefix), path.basename(pythonExecutable)));
+                                
+                                const timeout = setTimeout(() => {
+                                    this.log.warn(`Watcher for ${prefix} timed out after 30 seconds. Disposing.`);
+                                    watcher.dispose();
+                                    this.temporaryWatchers.delete(prefix);
+                                }, 30000);
+
+                                const onPythonCreated = (uri: Uri) => {
+                                    this.log.info(`Python executable created at: ${uri.fsPath}. Triggering a refresh.`);
+                                    clearTimeout(timeout);
+                                    this.refresh(undefined);
+                                    watcher.dispose();
+                                    this.temporaryWatchers.delete(prefix);
+                                };
+
+                                watcher.onDidCreate(onPythonCreated);
+                                this.context.subscriptions.push(watcher);
+                                this.temporaryWatchers.set(prefix, { watcher, timeout });
+                            }
+                        }
+
+                        const group = isWorkspace(prefix) ? 'Workspace' : 'Named';
                         const execInfo: PythonEnvironmentExecutionInfo = {
                             run: { executable: pythonExecutable },
                             activatedRun: { executable: pythonExecutable, args: [] },
@@ -271,32 +332,21 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
                         if (pythonExists) {
                             const version = (await runCommand(pythonExecutable, ['--version'])).replace('Python ', '').trim();
                             envItemInfo = { 
-                                displayPath: prefix, 
-                                name: folderName, 
-                                version: version, 
-                                displayName: `${folderName} (${version})`, 
-                                environmentPath: Uri.file(prefix),
-                                sysPrefix: prefix,
-                                execInfo: execInfo,
-                                group:group 
+                                displayPath: prefix, name: folderName, version: version, 
+                                displayName: `${folderName} (${version})`, environmentPath: Uri.file(prefix),
+                                sysPrefix: prefix, execInfo: execInfo, group:group 
                             };
                         } else {
                             envItemInfo = { 
-                                displayPath: prefix, 
-                                name: folderName, 
-                                version: 'no-python', 
-                                displayName: `${folderName} (no python)`,
-                                environmentPath: Uri.file(prefix),
-                                sysPrefix: prefix,
-                                execInfo: execInfo,
-                                group: group,
+                                displayPath: prefix, name: folderName, version: 'no-python', 
+                                displayName: `${folderName} (no python)`, environmentPath: Uri.file(prefix),
+                                sysPrefix: prefix, execInfo: execInfo, group: group,
                                 iconPath: new ThemeIcon('warning') };
                         }
 
                         return this.api.createPythonEnvironmentItem({ ...envItemInfo, displayPath: prefix, environmentPath: Uri.file(prefix), sysPrefix: prefix, execInfo }, this);
                     }))).filter((e): e is PythonEnvironment => e !== null);
 
-                    // Sort by group, then by name
                     newEnvs.sort((a, b) => {
                         const aIsWorkspace = a.group === 'Workspace';
                         const bIsWorkspace = b.group === 'Workspace';
@@ -307,14 +357,31 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
 
                 } catch (error) { this.log.error('Error refreshing micromamba envs.', error); }
                 
+                const oldEnvsMap = new Map(oldEnvs.map(e => [e.environmentPath.fsPath, e]));
+                const newEnvsMap = new Map(newEnvs.map(e => [e.environmentPath.fsPath, e]));
                 const events: DidChangeEnvironmentsEventArgs = [];
-                const newPaths = new Set(newEnvs.map(e => e.environmentPath.fsPath));
-                oldEnvs.forEach(e => !newPaths.has(e.environmentPath.fsPath) && events.push({ environment: e, kind: EnvironmentChangeKind.remove }));
-                const oldPaths = new Set(oldEnvs.map(e => e.environmentPath.fsPath));
-                newEnvs.forEach(e => !oldPaths.has(e.environmentPath.fsPath) && events.push({ environment: e, kind: EnvironmentChangeKind.add }));
+
+                for (const [fsPath, oldEnv] of oldEnvsMap.entries()) {
+                    const newEnv = newEnvsMap.get(fsPath);
+                    if (!newEnv) {
+                        events.push({ environment: oldEnv, kind: EnvironmentChangeKind.remove });
+                    } else if (newEnv.displayName !== oldEnv.displayName) {
+                        events.push({ environment: oldEnv, kind: EnvironmentChangeKind.remove });
+                        events.push({ environment: newEnv, kind: EnvironmentChangeKind.add });
+                    }
+                }
+
+                for (const [fsPath, newEnv] of newEnvsMap.entries()) {
+                    if (!oldEnvsMap.has(fsPath)) {
+                        events.push({ environment: newEnv, kind: EnvironmentChangeKind.add });
+                    }
+                }
 
                 this.collection = newEnvs;
-                if (events.length > 0) this._onDidChangeEnvironments.fire(events);
+                if (events.length > 0) {
+                    this.log.info(`Firing ${events.length} environment change events to update UI.`);
+                    this._onDidChangeEnvironments.fire(events);
+                }
             }
         );
     }
