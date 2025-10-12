@@ -298,7 +298,8 @@ export class MicromambaEnvManager implements EnvironmentManager, Disposable {
                             
                             if (ageInSeconds < 60) {
                                 this.log.info(`Python executable not found for new environment ${prefix}. Setting up a temporary watcher.`);
-                                const watcher = workspace.createFileSystemWatcher(new RelativePattern(Uri.file(prefix), path.basename(pythonExecutable)));
+                                const relativePath = path.relative(prefix, pythonExecutable);
+                                const watcher = workspace.createFileSystemWatcher(new RelativePattern(Uri.file(prefix), relativePath));
                                 
                                 const timeout = setTimeout(() => {
                                     this.log.warn(`Watcher for ${prefix} timed out after 30 seconds. Disposing.`);
