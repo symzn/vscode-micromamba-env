@@ -35,6 +35,7 @@ A Visual Studio Code extension that discovers and displays your micromamba envir
 
 ## Known Issues
 
+-   **Command Palette & Notebook Kernel Inconsistency**: Environments may not appear in the list when using the `Python: Select Interpreter` command or when selecting a kernel in a Jupyter Notebook. This is an upstream issue in the parent extension. **Workaround**: Use the Python Environments view in the sidebar or click the interpreter selector in the status bar. For more details, see [GitHub Issue #942](https://github.com/microsoft/vscode-python-environments/issues/942).
 -   **Debugger Activation on Linux**: There is a known issue on Linux where the Python debugger may launch before the micromamba environment is fully activated. This can cause errors if your code relies on packages or environment variables from that environment. For more details, please follow the discussion on [GitHub Issue #934](https://github.com/microsoft/vscode-python-environments/issues/934).
 
 ## Contributing
