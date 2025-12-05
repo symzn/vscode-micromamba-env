@@ -1,8 +1,8 @@
 {
   "name": "vscode-micromamba-env",
-  "displayName": "Micromamba Environment Provider (python-environments)",
+  "displayName": "(DEPRECATED) Micromamba Environment Provider (python-environments)",
   "description": "Discovers, displays, set your micromamba environments through the Python Environments extension.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "symzn",
   "engines": {
     "vscode": "^1.90.0"
