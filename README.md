@@ -1,5 +1,14 @@
 # Micromamba Environment Provider
 
+## ⚠️ DEPRECATED
+
+**This extension is put on hold waiting issue correction on `ms-python.vscode-python-envs`.**
+
+Please install the new, improved version here: [Micromamba Envs](https://marketplace.visualstudio.com/items?itemName=symzn.vscode-micromamba-envs)
+
+It provides better performance, simpler configuration, and fixes many bugs.
+
+
 [![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/symzn.vscode-micromamba-env?style=flat-square&label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=symzn.vscode-micromamba-env)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
